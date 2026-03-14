@@ -4,6 +4,7 @@
  * Server for Assignment 5
  */
 
+#define _GNU_SOURCE // https://github.com/Microsoft/vscode/issues/71012
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,19 @@
 #define BUFFER_SIZE 1024
 #define FILENAME "/var/tmp/aesdsocketdata"
 
+static void signal_handler(int signum)
+{
+    int errno_saved = errno;
+    syslog(LOG_USER | LOG_INFO, "Caught signal, exiting");
+    if (unlink(FILENAME) < 0)
+    {
+        perror("unlink");
+        syslog(LOG_USER | LOG_ERR, "Error unlinking file <%s> [%s]", FILENAME, strerror(errno));
+    }
+    errno = errno_saved;
+    exit(EXIT_SUCCESS);
+}
+
 int main(int argc, char *argv[])
 {
     int sockfd, clfd;
@@ -29,7 +43,19 @@ int main(int argc, char *argv[])
     struct sockaddr_in serv_addr, cli_addr;
     ssize_t n;
 
-    // TODO: add signal handler - rm FILENAME
+    struct sigaction new_action;
+    memset(&new_action, 0, sizeof(struct sigaction));
+    new_action.sa_handler = signal_handler;
+    if (sigaction(SIGINT, &new_action, NULL) != 0)
+    {
+        perror("Setting SIGINT handler");
+        syslog(LOG_USER | LOG_ERR, "Error registering SIGINT handler [%s]", strerror(errno));
+    }
+    if (sigaction(SIGTERM, &new_action, NULL) != 0)
+    {
+        perror("Setting SIGTERM handler");
+        syslog(LOG_USER | LOG_ERR, "Error registering SIGTERM handler [%s]", strerror(errno));
+    }
 
     // Open syslog for logging
     openlog("aesdsocket", LOG_PID | LOG_CONS, LOG_USER);
