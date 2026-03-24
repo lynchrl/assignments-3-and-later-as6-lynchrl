@@ -88,6 +88,42 @@ int main(int argc, char *argv[])
     socklen_t clilen;
     struct sockaddr_in serv_addr, cli_addr;
 
+    // Create socket for IPv4
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+    {
+        perror("socket");
+        syslog(LOG_USER | LOG_ERR, "Error opening socket [%s]", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // Set up server address structure explicitly for IPv4.
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(SERVER_PORT);
+
+    // Bind socket to address. Need to cast sockaddr_in to sockaddr.
+    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        perror("bind");
+        syslog(LOG_USER | LOG_ERR, "bind() error [%s]", strerror(errno));
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
+
+    // Daemonize if the "-d" arg is set. LSP Ch. 5.
+    if (argc > 1 && strcmp(argv[1], "-d") == 0)
+    {
+        if (daemon(0, 0) < 0)
+        {
+            perror("daemon");
+            syslog(LOG_USER | LOG_ERR, "Error daemonizing server process [%s]", strerror(errno));
+            close(sockfd);
+            exit(EXIT_FAILURE);
+        }
+    }
+
     // Set up our signal handler for SIGINT or SIGTERM.
     struct sigaction new_action;
     memset(&new_action, 0, sizeof(struct sigaction));
@@ -142,42 +178,6 @@ int main(int argc, char *argv[])
         perror("timer_settime");
         syslog(LOG_USER | LOG_ERR, "Error setting timer for SIGALRM [%s]", strerror(errno));
         exit(EXIT_FAILURE);
-    }
-
-    // Create socket for IPv4
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-    {
-        perror("socket");
-        syslog(LOG_USER | LOG_ERR, "Error opening socket [%s]", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-
-    // Set up server address structure explicitly for IPv4.
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(SERVER_PORT);
-
-    // Bind socket to address. Need to cast sockaddr_in to sockaddr.
-    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
-    {
-        perror("bind");
-        syslog(LOG_USER | LOG_ERR, "bind() error [%s]", strerror(errno));
-        close(sockfd);
-        exit(EXIT_FAILURE);
-    }
-
-    // Daemonize if the "-d" arg is set. LSP Ch. 5.
-    if (argc > 1 && strcmp(argv[1], "-d") == 0)
-    {
-        if (daemon(0, 0) < 0)
-        {
-            perror("daemon");
-            syslog(LOG_USER | LOG_ERR, "Error daemonizing server process [%s]", strerror(errno));
-            close(sockfd);
-            exit(EXIT_FAILURE);
-        }
     }
 
     // Listen for incoming connections. Backlog is 5 for up to 5 pending connections.
