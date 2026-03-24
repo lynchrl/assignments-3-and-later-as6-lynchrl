@@ -2,16 +2,20 @@
 # and standard variables for compiler and flags. Use the -g flag to include
 # debugging symbols in the executable.
 
-CC = gcc
-CFLAGS = -g -Wall -Werror
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -g -Wall -Werror
+LDFLAGS ?= -lpthread
 
 all: aesdsocket
 
-aesdsocket: aesdsocket.o
-	$(CC) $(CFLAGS) -o $@ $^
+aesdsocket: aesdsocket.o handler.o
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-aesdsocket.o: aesdsocket.c
-	$(CC) $(CFLAGS) -c $<
+aesdsocket.o: aesdsocket.c aesdsocket.h handler.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -c $<
+
+handler.o: handler.c handler.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -c $<
 
 clean:
-	rm -f aesdsocket aesdsocket.o
+	rm -f aesdsocket aesdsocket.o handler.o

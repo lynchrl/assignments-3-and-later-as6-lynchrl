@@ -19,10 +19,9 @@
 #include <errno.h>
 
 #include "aesdsocket.h"
+#include "handler.h"
 
-#define SERVER_PORT 9000
-#define BUFFER_SIZE 1024
-#define FILENAME "/var/tmp/aesdsocketdata"
+typedef SLIST_HEAD(conn_node_s, conn_node) conn_node_head_t;
 
 static void signal_handler(int signum)
 {
@@ -45,11 +44,17 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    // Singly-linked list for client handler thread tracking.
+    conn_node_head_t conn_node_head;
+    SLIST_INIT(&conn_node_head);
+
+    // Shared mutex for output file synchronization.
+    pthread_mutex_t file_mutex;
+    pthread_mutex_init(&file_mutex, NULL);
+
     int sockfd, clfd;
     socklen_t clilen;
-    char read_buffer[BUFFER_SIZE];
     struct sockaddr_in serv_addr, cli_addr;
-    ssize_t n;
 
     // Set up our signal handler for SIGINT or SIGTERM.
     struct sigaction new_action;
@@ -121,124 +126,46 @@ int main(int argc, char *argv[])
         }
         syslog(LOG_USER | LOG_DEBUG, "Accepted connection from %s", inet_ntoa(cli_addr.sin_addr));
 
-        // Buffer to store data up to a newline character. We will read data in BUFFER_SIZE
-        // chunks and write to file when a newline is encountered.
-        char *data_buffer = malloc(BUFFER_SIZE);
-        if (data_buffer == NULL)
+        // Create new conn_node for the connection, set fields, and add to list.
+        conn_node_t *new_node = malloc(sizeof(conn_node_t));
+        if (new_node == NULL)
         {
-            perror("malloc for data_buffer");
-            syslog(LOG_USER | LOG_ERR, "Error allocating buffer [%s]", strerror(errno));
+            perror("malloc");
+            syslog(LOG_USER | LOG_ERR, "Error allocating memory for new connection node [%s]", strerror(errno));
             close(clfd);
-            continue; // Try to continue accepting new connections.
+            continue;
         }
-        size_t data_len = 0;
+        new_node->cli_addr = cli_addr;
+        new_node->clfd = clfd;
+        new_node->file_mutex = &file_mutex;
+        new_node->done = false;
+        SLIST_INSERT_HEAD(&conn_node_head, new_node, nodes);
 
-        // Read data from client and write to file
-        while ((n = recv(clfd, read_buffer, BUFFER_SIZE - 1, 0)) > 0)
+        // Create thread to handle the connection. Pass pointer to conn_node as arg.
+        if (pthread_create(&new_node->thread_id, NULL, handle_connection, new_node) != 0)
         {
-            // Store data in a buffer and write to file when a newline is encountered. If we exceed the data buffer size,
-            // we need to malloc a larger buffer and copy the existing data over.
-            for (ssize_t i = 0; i < n; i++)
-            {
-                // Grow data_buffer if necessary.
-                if (data_len >= BUFFER_SIZE)
-                {
-                    size_t new_size = data_len + BUFFER_SIZE;
-                    char *new_buffer = realloc(data_buffer, new_size);
-                    if (new_buffer == NULL)
-                    {
-                        perror("realloc for data_buffer");
-                        syslog(LOG_USER | LOG_ERR, "Error reallocating buffer [%s]", strerror(errno));
-                        break; // Break out of the loop to close the connection
-                    }
-                    data_buffer = new_buffer;
-                }
-                data_buffer[data_len++] = read_buffer[i];
-
-                // If we encounter a newline character, write the data "packet" to file and reset the buffer.
-                if (read_buffer[i] == '\n')
-                {
-                    // Append data to file
-                    if (append_packet(FILENAME, data_buffer, data_len) != 0)
-                    {
-                        syslog(LOG_USER | LOG_ERR, "Error appending packet to %s", FILENAME);
-                        break;
-                    }
-                    // syslog(LOG_USER | LOG_DEBUG, "Wrote <%s> to file <%s>", data_buffer, FILENAME);
-                    // Reset data buffer for next line of input.
-                    data_len = 0;
-                    free(data_buffer);
-                    data_buffer = malloc(BUFFER_SIZE);
-                    if (data_buffer == NULL)
-                    {
-                        perror("malloc new data_buffer");
-                        syslog(LOG_USER | LOG_ERR, "Error allocating buffer [%s]", strerror(errno));
-                        break;
-                    }
-
-                    // Write full file contents back to client.
-                    int fd = open(FILENAME, O_RDONLY);
-                    if (fd < 0)
-                    {
-                        perror("open");
-                        syslog(LOG_USER | LOG_ERR, "Error opening file (%s) [%s]", FILENAME, strerror(errno));
-                        close(clfd);
-                        free(data_buffer);
-                        continue;
-                    }
-                    while ((n = read(fd, read_buffer, BUFFER_SIZE)) > 0)
-                    {
-                        if (n < 0)
-                        {
-                            perror("read");
-                            syslog(LOG_USER | LOG_ERR, "Error reading file (%s) [%s]", FILENAME, strerror(errno));
-                            break;
-                        }
-                        // printf("Sending <%s> to client\n", read_buffer);
-                        ssize_t sent = send(clfd, read_buffer, n, 0);
-                        if (sent != n)
-                        {
-                            syslog(LOG_USER | LOG_ERR, "Read (%ld) and send (%ld) mismatch", n, sent);
-                            break;
-                        }
-                    }
-                    close(fd);
-                }
-            }
-        }
-        free(data_buffer);
-        if (n < 0)
-        {
-            perror("Error reading from socket");
-            syslog(LOG_USER | LOG_ERR, "Error reading from socket [%s]", strerror(errno));
+            perror("pthread_create");
+            syslog(LOG_USER | LOG_ERR, "Error creating thread for new connection [%s]", strerror(errno));
+            SLIST_REMOVE(&conn_node_head, new_node, conn_node, nodes);
+            free(new_node);
             close(clfd);
             continue;
         }
 
-        close(clfd);
-        syslog(LOG_USER | LOG_DEBUG, "Closed connection from %s", inet_ntoa(cli_addr.sin_addr));
+        // Use SLIST_FOREACH_SAFE to iterate through the list and clean up any nodes whose threads have completed.
+        conn_node_t *cur_node, *tmp_node;
+        SLIST_FOREACH_SAFE(cur_node, &conn_node_head, nodes, tmp_node)
+        {
+            if (cur_node->done)
+            {
+                pthread_join(cur_node->thread_id, NULL);
+                SLIST_REMOVE(&conn_node_head, cur_node, conn_node, nodes);
+                free(cur_node);
+            }
+        }
     }
-    closelog();
-    return 0;
-}
 
-int append_packet(const char *fname, const char *buf, size_t len)
-{
-    int fd = open(fname, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd == -1)
-    {
-        perror("Error opening file (filename: " FILENAME ")");
-        syslog(LOG_USER | LOG_ERR, "Error opening file [%s]: %s", strerror(errno), FILENAME);
-        return -1;
-    }
-    ssize_t res = write(fd, buf, len);
-    if (res == -1)
-    {
-        perror("Error writing to file (filename: " FILENAME ")");
-        syslog(LOG_USER | LOG_ERR, "Error writing to file [%s]: %s", strerror(errno), FILENAME);
-        close(fd);
-        return -1;
-    }
-    close(fd);
+    pthread_mutex_destroy(&file_mutex);
+    closelog();
     return 0;
 }
