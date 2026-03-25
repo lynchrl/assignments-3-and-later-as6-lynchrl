@@ -65,6 +65,23 @@ static void alarm_handler(int sig, siginfo_t *si, void *uc)
     pthread_mutex_unlock(&server_info->file_mutex);
 }
 
+int reap_threads(server_info_t *server_info)
+{
+    conn_node_t *cur_node, *tmp_node;
+    int reaped_count = 0;
+    SLIST_FOREACH_SAFE(cur_node, &server_info->conn_node_head, nodes, tmp_node)
+    {
+        if (cur_node->done)
+        {
+            pthread_join(cur_node->thread_id, NULL);
+            SLIST_REMOVE(&server_info->conn_node_head, cur_node, conn_node, nodes);
+            free(cur_node);
+            reaped_count++;
+        }
+    }
+    return reaped_count;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc > 2)
@@ -228,30 +245,10 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        // Use SLIST_FOREACH_SAFE to iterate through the list and clean up any nodes whose threads have completed.
-        conn_node_t *cur_node, *tmp_node;
-        SLIST_FOREACH_SAFE(cur_node, &server_info.conn_node_head, nodes, tmp_node)
-        {
-            if (cur_node->done)
-            {
-                pthread_join(cur_node->thread_id, NULL);
-                SLIST_REMOVE(&server_info.conn_node_head, cur_node, conn_node, nodes);
-                free(cur_node);
-            }
-        }
+        reap_threads(&server_info);
     }
 
-    // Final cleanup of any remaining connection nodes and threads.
-    conn_node_t *cur_node, *tmp_node;
-    SLIST_FOREACH_SAFE(cur_node, &server_info.conn_node_head, nodes, tmp_node)
-    {
-        if (cur_node->done)
-        {
-            pthread_join(cur_node->thread_id, NULL);
-            SLIST_REMOVE(&server_info.conn_node_head, cur_node, conn_node, nodes);
-            free(cur_node);
-        }
-    }
+    reap_threads(&server_info);
     close(sockfd);
     pthread_mutex_destroy(&file_mutex);
     if (unlink(FILENAME) < 0)
